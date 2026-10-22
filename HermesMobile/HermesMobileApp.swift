@@ -79,10 +79,13 @@ struct HermexCommands: Commands {
 struct HermesMobileApp: App {
     // APNs hands device tokens to a UIKit delegate and nowhere else.
     @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
-    @State private var authManager = AuthManager()
+    @State private var authManager: AuthManager
     @AppStorage(AppTheme.storageKey) private var appThemeRawValue = AppTheme.system.rawValue
 
     init() {
+        let auth = AuthManager()
+        _authManager = State(initialValue: auth)
+        WatchPhoneBridge.shared.start(auth: auth)
         LaunchSignpost.begin()
         // Record installation age even before a server has been configured.
         _ = RatingPromptState.shared

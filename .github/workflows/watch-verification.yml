@@ -1,0 +1,96 @@
+# Fork-only validation for this feature branch. No signing secrets, upload or release jobs.
+name: Watch Branch Verification
+
+on:
+  push:
+    branches: [feat/apple-watch-complication]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watch-verification-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apple-sdk:
+    if: github.repository == 'cwallace/hermex' && github.ref == 'refs/heads/feat/apple-watch-complication'
+    runs-on: xcode-27
+    timeout-minutes: 90
+    env:
+      # Same hosted public-preview image and Xcode as upstream PR CI. Both iOS 27
+      # and watchOS 27 SDKs/runtimes are installed; never download a fallback SDK.
+      DEVELOPER_DIR: /Applications/Xcode_27.0.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+      - name: Inspect Apple toolchain and select iPhone
+        id: sim
+        run: |
+          set -euo pipefail
+          mkdir -p watch-verification
+          xcodebuild -version | tee watch-verification/toolchain.log
+          xcodebuild -showsdks | tee watch-verification/sdks.log
+          xcrun simctl list devices available --json > watch-verification/devices.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          devices = json.loads(Path('watch-verification/devices.json').read_text())['devices']
+          matches = [d for d in devices.get('com.apple.CoreSimulator.SimRuntime.iOS-27-0', [])
+                     if d.get('isAvailable') and d['name'] == 'iPhone 17']
+          if len(matches) != 1:
+              raise SystemExit('Expected one iPhone 17 on iOS 27. See devices.json.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f"udid={matches[0]['udid']}\n")
+          PY
+      - name: Build native Watch app and complication
+        run: |
+          set -euo pipefail
+          xcodebuild build -project HermesMobile.xcodeproj -scheme HermesWatch \
+            -destination 'generic/platform=watchOS Simulator' \
+            -derivedDataPath WatchDerivedData -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee watch-verification/watch-build.log
+      - name: Build iPhone app with embedded Watch app and XCTest
+        run: |
+          set -euo pipefail
+          xcodebuild build-for-testing -project HermesMobile.xcodeproj -scheme HermesMobile \
+            -destination 'platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}' \
+            -derivedDataPath DerivedData -disableAutomaticPackageResolution \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee watch-verification/iphone-build.log
+      - name: Run focused relay and session policy tests
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building -project HermesMobile.xcodeproj -scheme HermesMobile \
+            -destination 'platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}' \
+            -derivedDataPath DerivedData -resultBundlePath watch-verification/Tests.xcresult \
+            -disableAutomaticPackageResolution -parallel-testing-enabled NO -collect-test-diagnostics never \
+            -only-testing:HermesMobileTests/WatchRelayTests \
+            -only-testing:HermesMobileTests/SessionRowAttentionStateTests \
+            -only-testing:HermesMobileTests/HermesConversationTests \
+            -only-testing:HermesMobileTests/APIClientSessionMutationTests \
+            -only-testing:HermesMobileTests/APIClientAuthAndErrorTests \
+            -only-testing:HermesMobileTests/AuthManagerStateTests \
+            -only-testing:HermesMobileTests/AppLockTests \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee watch-verification/tests.log
+      # The feature changes the Xcode project and the shared HTTP dispatch seam,
+      # so validate the complete retained suite as required by AGENTS.md.
+      - name: Run full regression suite
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          xcodebuild test-without-building -project HermesMobile.xcodeproj -scheme HermesMobile \
+            -destination 'platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}' \
+            -derivedDataPath DerivedData -resultBundlePath watch-verification/FullTests.xcresult \
+            -disableAutomaticPackageResolution -parallel-testing-enabled YES \
+            -parallel-testing-worker-count 1 -collect-test-diagnostics never \
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee watch-verification/full-tests.log
+      - name: Check phone String Catalog coverage
+        run: python3 ci/check_string_catalog.py --derived-data DerivedData
+      - name: Retain validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: watch-verification
+          path: watch-verification/
+          if-no-files-found: ignore

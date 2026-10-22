@@ -62,6 +62,8 @@ final class AuthManager {
         }
     }
     private(set) var lastErrorMessage: String?
+    /// Blocks paired-Watch work from the first await of sign-out.
+    private(set) var isSigningOut = false
 
     /// Observable snapshot of every configured server, mirrored from the
     /// `ServerRegistry` (the persistent source of truth) after each mutation so
@@ -501,6 +503,9 @@ final class AuthManager {
     /// record, Bot data and push pairing are deleted and its sign-in form shows, with its
     /// address (#899).
     func signOut() async {
+        guard !isSigningOut else { return }
+        isSigningOut = true
+        defer { isSigningOut = false }
         guard let active = state.server else {
             // Defensive: nothing is active. Safe full reset to onboarding.
             clearLocalAuth(for: nil)

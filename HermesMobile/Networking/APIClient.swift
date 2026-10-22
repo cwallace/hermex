@@ -15,14 +15,18 @@ actor APIClient {
     /// Read when building each request so live edits apply without rebuilding the
     /// client. Defaults to the process-wide store; tests inject a fixed list (#255).
     private let customHeaderProvider: @Sendable () -> [CustomHeader]
+    /// Optional per-client ownership check, run at the actual HTTP dispatch.
+    private let requestAdmission: (@Sendable () throws -> Void)?
 
     init(
         baseURL: URL,
         session: URLSession? = nil,
         publicMediaSession: URLSession? = nil,
+        requestAdmission: (@Sendable () throws -> Void)? = nil,
         customHeaderProvider: @escaping @Sendable () -> [CustomHeader] = { CustomHeaderStore.shared.snapshot() }
     ) {
         self.baseURL = baseURL
+        self.requestAdmission = requestAdmission
         self.customHeaderProvider = customHeaderProvider
 
         // One redirect guard per client (its origin + header provider), attached
@@ -234,6 +238,7 @@ actor APIClient {
         _ request: URLRequest,
         requireSuccess: Bool = true
     ) async throws -> (Data, HTTPURLResponse) {
+        try requestAdmission?()
         let data: Data
         let response: URLResponse
         do {
